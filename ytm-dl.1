@@ -1,0 +1,95 @@
+.TH YTM-DL 1 "2026" "ytm-dl 0.4.0" "User Commands"
+.SH NAME
+ytm-dl \- minimal TUI for bulk-downloading YouTube Music albums, EPs and singles
+.SH SYNOPSIS
+.B ytm-dl
+[\fIOPTIONS\fR] [\fIFILE\fR | \fILINK\fR[,\fILINK\fR...]]
+.SH DESCRIPTION
+A small wrapper around
+.BR yt-dlp (1)
+that downloads many YouTube Music links in parallel and shows their status in a
+minimal monochrome terminal UI.
+With no argument it asks for input. The input may be a path to a text file, several
+links separated by commas, or a single link.
+.PP
+In a text file, links may be separated by commas, new lines, or both.
+.SH OPTIONS
+.TP
+.BR \-o ", " \-\-out " \fIDIR\fR"
+Output directory. Default: ~/Music/ytm-dl.
+.TP
+.BR \-f ", " \-\-format " \fIFMT\fR"
+One of mp3, m4a, opus, flac. Default mp3. Giving this option skips the format picker.
+.TP
+.BR \-j ", " \-\-jobs " \fIN\fR"
+Number of links downloaded in parallel. Default 2.
+.TP
+.BR \-c ", " \-\-cookies " \fIBROWSER\fR"
+Use cookies from a browser (for example firefox) to reduce throttling and bot checks.
+.TP
+.BR \-v ", " \-\-verbose
+Pass \-v to yt-dlp and keep the logs of failed links in OUT/.logs.
+.TP
+.B \-\-plain
+No TUI: process one link at a time and show yt-dlp's own output. This is also used
+automatically when stdin or stdout is not a terminal.
+.TP
+.B \-\-example
+Print an example links file.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.TP
+.BR \-h ", " \-\-help
+Print a short usage text.
+.SH KEYS
+In the format picker: up/down to move, 1-4 to jump, Enter to confirm, q to quit.
+While downloading: q cancels. When finished, any key exits.
+.SH ENVIRONMENT
+.TP
+.B YTM_DL_DIR
+Output directory (same as \-\-out).
+.TP
+.B YTM_DL_FORMAT
+Default format; when set, the format picker is skipped.
+.TP
+.B YTM_DL_JOBS
+Parallel links. Default 2.
+.TP
+.B YTM_DL_STALL
+Seconds without any new bytes before a link is killed and retried. Default 60.
+.TP
+.B YTM_DL_RETRIES
+Automatic retries per link. Finished tracks are skipped on retry. Default 2.
+.TP
+.B YTM_DL_COOKIES
+Browser to take cookies from (same as \-\-cookies).
+.TP
+.B YTM_DL_VERBOSE
+Set to 1 for verbose yt-dlp output and kept logs.
+.SH FILES
+.TP
+.I OUT/<album>/<NN - title>.<ext>
+Downloaded tracks. A single-track link is saved in its album's folder, or in
+.I OUT/Singles/
+when it has no album.
+.TP
+.I OUT/.archive
+yt-dlp download archive. Tracks listed here are skipped on later runs.
+Delete it to download everything again.
+.TP
+.I OUT/.logs/
+Logs of failed links.
+.SH EXAMPLES
+.nf
+ytm-dl
+ytm-dl links.txt
+ytm-dl -f flac -j 3 links.txt
+ytm-dl 'https://music.youtube.com/playlist?list=OLAK5uy_...'
+ytm-dl --plain -v links.txt
+.fi
+.SH EXIT STATUS
+0 if every link succeeded, 1 if any failed, 130 if cancelled.
+.SH SEE ALSO
+.BR yt-dlp (1),
+.BR ffmpeg (1)

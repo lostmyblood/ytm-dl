@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+# ytm-dl - minimal bulk downloader for YouTube Music (yt-dlp wrapper)
+# requires: bash>=4.4 yt-dlp ffmpeg procps-ng   optional: deno (recommended), python-mutagen (opus covers)
+
+VERSION=0.4.0
+OUT=${YTM_DL_DIR:-$HOME/Music/ytm-dl}
+FMT=${YTM_DL_FORMAT:-mp3}        # mp3 | m4a (no re-encode) | opus | flac
+FMT_SET=${YTM_DL_FORMAT:+1}      # set => skip the format picker
+JOBS=${YTM_DL_JOBS:-2}           # parallel links
+STALL=${YTM_DL_STALL:-60}        # seconds with NO new bytes before a link is killed and retried
+RETRIES=${YTM_DL_RETRIES:-2}     # automatic retries per link (finished tracks are skipped)
+VERBOSE=${YTM_DL_VERBOSE:-}      # 1 => yt-dlp -v, logs of failed links kept in OUT/.logs
+COOKIES=${YTM_DL_COOKIES:-}      # e.g. firefox, chromium
+PLAIN=
+
+R=$'\e[0m' BOLD=$'\e[1m' EL=$'\e[K'
+C1=$'\e[38;5;238m' C2=$'\e[38;5;244m' C3=$'\e[38;5;250m' C4=$'\e[38;5;255m'
+
+usage() {
+cat <<EOF
+ytm-dl $VERSION - bulk YouTube Music downloader
+
+usage: ytm-dl [options] [file.txt | link[,link...]]
+
+  -o, --out DIR      output directory    (default: $OUT)
+  -f, --format FMT   mp3|m4a|opus|flac   (default: $FMT; skips the picker)
+  -j, --jobs N       parallel links      (default: $JOBS)
+  -c, --cookies BR   use cookies from a browser, e.g. firefox
+  -v, --verbose      pass -v to yt-dlp; logs of failed links go to OUT/.logs
+      --plain        no TUI: one link at a time, raw yt-dlp output
+      --example      print an example links file
+  -V, --version
+  -h, --help
+
+Input: a .txt file, comma-separated links, or one link.
+In a file, links may be separated by commas and/or new lines.
+Saved as OUT/<album>/<NN - title>.<ext>; re-running skips finished tracks.
+EOF
+}
+
+INPUT=
+need() { (($#>1)) || { echo "ytm-dl: $1 needs a value" >&2; exit 1; }; }
+while (($#)); do
+  case $1 in
+    -h|--help) usage; exit 0 ;;
+    -V|--version) echo "ytm-dl $VERSION"; exit 0 ;;
+    --example)
+      printf '%s\n' 'https://music.youtube.com/playlist?list=OLAK5uy_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,' \
+        'https://music.youtube.com/playlist?list=OLAK5uy_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB,' \
+        'https://music.youtube.com/watch?v=XXXXXXXXXXX,' 'https://music.youtube.com/watch?v=YYYYYYYYYYY'
+      exit 0 ;;
+    -o|--out) need "$@"; OUT=$2; shift ;;
+    -f|--format) need "$@"; FMT=$2 FMT_SET=1; shift ;;
+    -j|--jobs) need "$@"; JOBS=$2; shift ;;
+    -c|--cookies) need "$@"; COOKIES=$2; shift ;;
+    -v|--verbose) VERBOSE=1 ;;
+    --plain) PLAIN=1 ;;
+    *) INPUT+="${INPUT:+,}$1" ;;
+  esac
+  shift
+done
+case $FMT in mp3|m4a|opus|flac) ;; *) echo "ytm-dl: unknown format '$FMT' (mp3|m4a|opus|flac)" >&2; exit 1 ;; esac
+[[ $JOBS =~ ^[1-9][0-9]*$ ]] || JOBS=2
+[[ $RETRIES =~ ^[0-9]+$ ]] || RETRIES=2
+[[ $STALL =~ ^[1-9][0-9]*$ ]] || STALL=60
+[[ -t 0 && -t 1 ]] || PLAIN=1   # no terminal (pipe, cron, ssh -T): skip the TUI
+for d in yt-dlp ffmpeg; do
+  command -v "$d" >/dev/null || { echo "ytm-dl: missing '$d'  ->  sudo pacman -S yt-dlp ffmpeg" >&2; exit 1; }
+done
+
+TMP=$(mktemp -d) || exit 1
+OUT=${OUT/#\~/$HOME}
+
+# fork-free sleep: read with a timeout on a fifo nobody writes to
+mkfifo "$TMP/nap" && exec {NAPFD}<>"$TMP/nap"
+nap() { read -rt "$1" -u "$NAPFD"; return 0; }
+
+# ---------- screen ----------
+ALT= PREV=
+enter_screen() { ALT=1; printf '\e[?1049h\e[?25l\e[H\e[2J'; }
+leave_screen() { [[ -n $ALT ]] && printf '\e[?25h\e[?1049l'; ALT=; }
+getsize() {
+  local s; s=$(stty size 2>/dev/null) || s="24 80"
+  ROWS=${s% *} COLS=${s#* }
+  ((ROWS>0)) || ROWS=24; ((COLS>30)) || COLS=80
+  printf -v RULE '%*s' $((COLS-2)) ''; RULE=${RULE// /─}
+}
+getsize; trap 'getsize; PREV=' WINCH
+
+cleanup() {
+  local p c
+  for p in $(jobs -p); do
+    for c in $(pgrep -P "$p"); do pkill -TERM -P "$c" 2>/dev/null; done   # ffmpeg under yt-dlp
+    pkill -TERM -P "$p" 2>/dev/null; kill "$p" 2>/dev/null
+  done
+  leave_screen; rm -rf "$TMP"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+die() { leave_screen; printf 'ytm-dl: %s\n' "$*" >&2; exit 1; }
+header() { printf '%s%s ytm-dl%s%s  %s\n%s %s%s\n\n' "$C4" "$BOLD" "$R" "$C1" "$VERSION" "$C1" "$RULE" "$R"; }
+
+# ---------- input ----------
+declare -a URLS=()
+SRC=
+trim() {  # -> $REPLY: whitespace and one pair of quotes removed
+  REPLY=${1#"${1%%[![:space:]]*}"}; REPLY=${REPLY%"${REPLY##*[![:space:]]}"}
+  REPLY=${REPLY#[\'\"]}; REPLY=${REPLY%[\'\"]}
+}
+parse_input() {
+  local raw p u; local -a parts; local -A seen=()
+  trim "$1"; raw=$REPLY; p=${raw/#\~/$HOME}
+  if [[ -f $p ]]; then SRC=${p##*/}; raw=$(<"$p")
+  elif [[ $raw != *youtu* ]]; then die "not a file or link: $raw"; fi
+  raw=${raw//$'\r'/}; raw=${raw//$'\n'/,}
+  IFS=, read -ra parts <<<"$raw"
+  for u in "${parts[@]}"; do
+    trim "$u"; u=$REPLY
+    [[ $u == http*youtu* && -z ${seen[$u]-} ]] || continue
+    seen[$u]=1 URLS+=("$u")
+  done
+  ((${#URLS[@]})) || die "no valid YouTube links found"
+  : "${SRC:=${#URLS[@]} link(s)}"
+}
+
+if [[ -z $INPUT ]]; then
+  if [[ -n $PLAIN ]]; then read -er -p "links / file path: " INPUT || exit 0
+  else
+    enter_screen; header
+    printf '%s [Link]%s\n %sfile path · links separated by commas · single link%s\n\n\e[?25h' "$C3" "$R" "$C1" "$R"
+    read -er -p " › " INPUT || exit 0
+    printf '\e[?25l'
+  fi
+fi
+parse_input "$INPUT"
+N=${#URLS[@]}
+mkdir -p "$OUT" || die "cannot create $OUT"
+
+# ---------- format picker ----------
+FMTS=(mp3 m4a opus flac)
+FMT_NOTE=("most compatible, re-encoded (V0)" "native AAC, no re-encode" "native Opus, best size/quality" "lossless container, large files")
+pick_format() {
+  local sel=0 i k
+  for i in "${!FMTS[@]}"; do [[ ${FMTS[i]} == "$FMT" ]] && sel=$i; done
+  while :; do
+    printf '\e[H\e[2J'; header
+    printf '%s [Link]%s%s  %s%s\n\n%s [Format]%s\n\n' "$C3" "$R" "$C2" "${SRC:0:COLS-12}" "$R" "$C3" "$R"
+    for i in "${!FMTS[@]}"; do
+      if ((i==sel)); then printf '%s%s  › %-5s%s  %s%s\n' "$C4" "$BOLD" "${FMTS[i]}" "$R$C2" "${FMT_NOTE[i]}" "$R"
+      else printf '%s    %-5s  %s%s\n' "$C1" "${FMTS[i]}" "${FMT_NOTE[i]}" "$R"; fi
+    done
+    printf '\n%s ↑/↓ select · 1-4 jump · enter confirm · q quit%s' "$C1" "$R"
+    IFS= read -rsn1 k || exit 130
+    case $k in
+      $'\e') read -rsn2 -t 0.05 k
+             case $k in '[A') sel=$(( (sel+3) % 4 )) ;; '[B') sel=$(( (sel+1) % 4 )) ;; esac ;;
+      '') break ;;
+      [1-4]) sel=$((k-1)) ;;
+      q|Q) exit 130 ;;
+    esac
+  done
+  FMT=${FMTS[sel]}
+}
+
+# ---------- yt-dlp arguments (BASE is shared with --plain, so both behave the same) ----------
+declare -a BASE ARGS
+build_args() {
+  local r rt=()
+  BASE=(-x --audio-format "$FMT" --audio-quality 0
+    --embed-metadata --embed-thumbnail --convert-thumbnails jpg
+    --ppa "ThumbnailsConvertor+ffmpeg_o:-c:v mjpeg -q:v 2 -vf crop=\"'min(iw,ih)':'min(iw,ih)'\""
+    --replace-in-metadata playlist_title '^Album - ' ''
+    --socket-timeout 30 --retries 5 --fragment-retries 5 --extractor-retries 3
+    --ignore-errors --download-archive "$OUT/.archive"
+    -o "$OUT/%(playlist_title,album|Singles)s/%(playlist_index&{} - |)s%(title)s.%(ext)s")
+  [[ -n $COOKIES ]] && BASE+=(--cookies-from-browser "$COOKIES")
+  [[ -n $VERBOSE ]] && BASE+=(-v)
+  # YouTube needs a JavaScript runtime. deno is yt-dlp's default (nothing to pass); without it, allow node/bun
+  if ! command -v deno >/dev/null; then
+    for r in node bun; do command -v "$r" >/dev/null && rt+=(--js-runtimes "$r"); done
+    ((${#rt[@]})) && yt-dlp --help 2>/dev/null | grep -q -- '--js-runtimes' && BASE+=("${rt[@]}")
+  fi
+  ARGS=("${BASE[@]}" -q --progress --no-simulate --newline --no-warnings --progress-delta 0.5
+    --progress-template "download:DL|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)s"
+    --print "before_dl:M|%(playlist_title|)s|%(playlist_index|)s|%(playlist_count|)s|%(title)s")
+}
+
+nopl() { [[ $1 == *watch\?v=* || $1 == *youtu.be/* ]]; }   # single track: don't pull the whole mix
+
+if [[ -n $PLAIN ]]; then
+  build_args; rc=0
+  for u in "${URLS[@]}"; do
+    x=(); nopl "$u" && x=(--no-playlist)
+    printf '\n== %s\n' "$u"
+    yt-dlp "${BASE[@]}" "${x[@]}" -- "$u" || rc=1
+  done
+  exit $rc
+fi
+
+enter_screen
+[[ -n $FMT_SET ]] || pick_format
+printf '\e[H\e[2J'
+build_args
+
+# ---------- worker ----------
+# state file: state|type|idx|count|overall%|track|track%|speed|eta|title
+worker() {
+  local i=$1 url=$2 f="$TMP/$1.st" out="$TMP/$1.out" err="$TMP/$1.err"
+  local st=fetching ty=track ix= ct= pc=0 trk= tp= spd= eta= ti=$2
+  local line pl tt p n rc ypid fd last bytes= lastbytes= stalled=0 try=0 lg old
+  local -a x=()
+  put() { printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$st" "$ty" "$ix" "$ct" "$pc" "$trk" "$tp" "$spd" "$eta" "$ti" >"$f"; }
+  handle() {
+    case $line in
+      M\|*)
+        IFS='|' read -r _ pl ix ct tt <<<"$line"
+        [[ $ix =~ ^[0-9]+$ ]] && ix=$((10#$ix))   # yt-dlp zero-pads ("08"); bash would read that as octal
+        [[ $ct =~ ^[0-9]+$ ]] && ct=$((10#$ct))
+        st=downloading pc=0 trk=${tt//|/ } tp=0 spd= eta= last=$SECONDS
+        if [[ -z $ct ]]; then ty=track ti=$tt ix=
+        else
+          case ${pl,,} in
+            *" - ep")     ty=ep     ti=${pl% - [Ee][Pp]} ;;
+            *" - single") ty=single ti=${pl% - [Ss]ingle} ;;
+            *) [[ $url == *list=OLAK* ]] && ty=album || ty=list; ti=$pl ;;
+          esac
+          : "${ti:=$tt}"
+          [[ $ct =~ ^[0-9]+$ ]] && ((ct>0)) && pc=$(( (${ix:-1} - 1) * 100 / ct ))
+        fi
+        put ;;
+      DL\|*)
+        IFS='|' read -r _ p spd eta bytes <<<"$line"
+        p=${p//[[:space:]%]/} p=${p%%.*} spd=${spd//[[:space:]]/} eta=${eta//[[:space:]]/}
+        [[ $p =~ ^[0-9]+$ ]] || return
+        [[ $spd == Unknown* ]] && spd=; [[ $eta == Unknown* ]] && eta=
+        [[ $bytes != "$lastbytes" ]] && { lastbytes=$bytes last=$SECONDS; }
+        if [[ $ct =~ ^[0-9]+$ ]] && ((ct>0)); then pc=$(( ((${ix:-1} - 1) * 100 + p) / ct )); else pc=$p; fi
+        old=$tp tp=$p
+        [[ $old != "$tp" ]] && put ;;
+    esac
+  }
+  put
+  nopl "$url" && x=(--no-playlist)
+
+  while :; do
+    : >"$out"
+    yt-dlp "${ARGS[@]}" "${x[@]}" -- "$url" </dev/null >"$out" 2>>"$err" &
+    ypid=$!
+    exec {fd}<"$out"
+    last=$SECONDS stalled=0
+    while :; do
+      while IFS= read -r line <&"$fd"; do handle; done
+      kill -0 "$ypid" 2>/dev/null || break
+      if ((SECONDS - last > STALL)); then
+        stalled=1
+        pkill -TERM -P "$ypid" 2>/dev/null; kill -TERM "$ypid" 2>/dev/null; nap 2; kill -KILL "$ypid" 2>/dev/null
+        echo "ERROR: stalled on '${trk:-$url}': no new data for ${STALL}s" >>"$err"
+        break
+      fi
+      nap 0.5
+    done
+    wait "$ypid" 2>/dev/null; rc=$?
+    while IFS= read -r line <&"$fd"; do handle; done
+    exec {fd}<&-
+    ((rc==0 || try>=RETRIES)) && break
+    try=$((try+1)) st=retrying tp= spd= eta=
+    ((stalled)) && trk="stalled, retry $try/$RETRIES" || trk="error, retry $try/$RETRIES"
+    put; nap 3
+  done
+
+  if ((rc==0)); then st=done pc=100 trk= tp= spd= eta=
+  else
+    st=failed spd= eta=
+    mkdir -p "$OUT/.logs" && lg="$OUT/.logs/link-$((i+1)).log" && cp "$err" "$lg" && echo "$lg" >"$TMP/$i.log"
+  fi
+  put
+  echo "$rc" >"$TMP/$i.rc"
+}
+
+# ---------- render (only writes to the terminal when the frame changed) ----------
+declare -a CACHE=() FIN=() ACT=()
+FIRST=0 DONE_N=0 FAIL_N=0 FINISHED=0 next=0
+load() {  # i -> s ty ix ct pc trk tp spd eta ti (keeps the last complete line if a write is in flight)
+  local l
+  [[ -s $TMP/$1.st ]] && { l=$(<"$TMP/$1.st"); [[ $l == *'|'*'|'*'|'*'|'*'|'*'|'*'|'*'|'*'|'* ]] && CACHE[$1]=$l; }
+  IFS='|' read -r s ty ix ct pc trk tp spd eta ti <<<"${CACHE[$1]}"
+}
+render() {
+  local avail start i s ty ix ct pc trk tp spd eta ti nw g col cnt pcs row d det=0 a b f out=$'\e[H'
+  avail=$((ROWS-9-JOBS)); ((avail<1)) && avail=1
+  start=$((FIRST-1)); ((start+avail>N)) && start=$((N-avail)); ((start<0)) && start=0
+  nw=$((COLS-36)); ((nw<8)) && nw=8
+
+  out+="${C4}${BOLD} ytm-dl${R}${C1}  ${VERSION}${EL}"$'\n'"${C1} ${RULE}${R}${EL}"$'\n'"${EL}"$'\n'
+  out+="${C3} [Link]${R}${C2}  ${SRC:0:COLS-12}${R}${EL}"$'\n'"${EL}"$'\n'"${C3} [Download status]${R}${EL}"$'\n'
+
+  for ((i=start; i<start+avail && i<N; i++)); do
+    load "$i"
+    case $s in
+      queued) g="·" col=$C1 ;;
+      done)   g="✓" col=$C2 ;;
+      failed) g="✗" col=$C4$BOLD ;;
+      *)      g="›" col=$C4 ;;
+    esac
+    cnt=; [[ -n $ct ]] && cnt="$ix/$ct"
+    pcs="$pc%"; [[ $s == queued ]] && pcs=
+    ti=${ti#https://}; ((${#ti}>nw)) && ti="${ti:0:nw-1}…"
+    f=$((pc*12/100)); printf -v a '%*s' "$f" ''; printf -v b '%*s' $((12-f)) ''
+    printf -v row ' %s%s %-6s %-*s %7s %s%s%s%s%s %4s%s' "$col" "$g" "$ty" "$nw" "$ti" "$cnt" "$C4" "${a// /━}" "$C1" "${b// /─}" "$col" "$pcs" "$R"
+    out+="${row}${EL}"$'\n'
+  done
+
+  out+="${EL}"$'\n'
+  for i in "${ACT[@]}"; do
+    ((det<JOBS)) || break
+    load "$i"; [[ $s == queued ]] && continue
+    d=${ti#https://}
+    [[ -n $ct ]] && d+="  $ix/$ct"
+    [[ -n $trk ]] && d+="  ·  $trk"
+    [[ $s == downloading && -n $tp ]] && d+="  ${tp}%"
+    [[ -n $spd ]] && d+="  $spd"
+    [[ -n $eta ]] && d+="  eta $eta"
+    out+="${C2} ${d:0:COLS-3}${R}${EL}"$'\n'; det=$((det+1))
+  done
+  for ((; det<JOBS; det++)); do out+="${EL}"$'\n'; done
+
+  out+="${C1} ${RULE}${R}${EL}"$'\n'
+  if ((FINISHED)); then out+="${C3} ${DONE_N}/${N} done · ${FAIL_N} failed${R}${C1}   ${FMT} · press any key to exit${R}${EL}"
+  else out+="${C2} ${DONE_N}/${N} done · ${FAIL_N} failed · ${#ACT[@]} active${R}${C1}   ${FMT} · q cancel${R}${EL}"; fi
+  [[ $out == "$PREV" ]] && return
+  PREV=$out; printf '%s\e[J' "$out"
+}
+
+# ---------- run ----------
+for ((i=0;i<N;i++)); do CACHE[i]="queued|track|||0|||||${URLS[i]}"; done
+while :; do
+  for k in "${!ACT[@]}"; do
+    i=${ACT[k]}
+    [[ -e $TMP/$i.rc ]] || continue
+    FIN[i]=$(<"$TMP/$i.rc"); unset 'ACT[k]'
+    if [[ ${FIN[i]} == 0 ]]; then DONE_N=$((DONE_N+1)); else FAIL_N=$((FAIL_N+1)); fi
+    load "$i"
+  done
+  ACT=("${ACT[@]}")
+  while [[ -n ${FIN[FIRST]-} ]] && ((FIRST<N)); do FIRST=$((FIRST+1)); done
+  while ((${#ACT[@]}<JOBS && next<N)); do worker "$next" "${URLS[next]}" & ACT+=("$next"); next=$((next+1)); done
+  ((DONE_N+FAIL_N==N)) && FINISHED=1
+  render
+  ((FINISHED)) && break
+  read -rsn1 -t 0.5 k && [[ $k == [qQ] ]] && exit 130
+done
+read -rsn1 -t 0.05 _; read -rsn1
+
+# ---------- summary ----------
+leave_screen
+printf '%d/%d done, %d failed  ->  %s\n' "$DONE_N" "$N" "$FAIL_N" "$OUT"
+for ((i=0;i<N;i++)); do
+  [[ ${FIN[i]-0} == 0 ]] && continue
+  printf '  x %s\n    %s\n' "${URLS[i]}" "$(grep '^ERROR' "$TMP/$i.err" 2>/dev/null | tail -n1)"
+  [[ -s $TMP/$i.log ]] && printf '    log: %s\n' "$(<"$TMP/$i.log")"
+done
+((FAIL_N==0))
