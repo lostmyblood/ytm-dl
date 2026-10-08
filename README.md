@@ -67,22 +67,6 @@ tar xzf ytm-dl-pkg.tar.gz
 cd ytm-dl-pkg
 makepkg -si
 ```
-
-Uninstall with `sudo pacman -R ytm-dl`.
-
-### Without installing
-
-```bash
-bash ytm-dl links.txt
-```
-
-### Manual install
-
-```bash
-sudo install -Dm755 ytm-dl /usr/local/bin/ytm-dl
-sudo install -Dm644 ytm-dl.1 /usr/local/share/man/man1/ytm-dl.1
-```
-
 ---
 
 ## Usage
