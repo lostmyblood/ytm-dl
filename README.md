@@ -1,6 +1,6 @@
 # ytm-dl
 
-**A minimal, dark monochrome terminal UI for bulk-downloading YouTube Music albums, EPs and singles with yt-dlp.**
+**A minimal terminal UI for bulk-downloading YouTube Music albums, EPs and singles with yt-dlp.**
 
 ytm-dl is a single, lightweight bash script that wraps [yt-dlp](https://github.com/yt-dlp/yt-dlp). Give it a text file full of YouTube Music links, a comma-separated list, or one link, and it queues everything, downloads several links in parallel, and shows the status of each album, EP and single in a quiet gray-scale TUI.
 
@@ -10,23 +10,22 @@ ytm-dl is a single, lightweight bash script that wraps [yt-dlp](https://github.c
  [Link]  links.txt
 
  [Download status]
- › album  Souvlaki                              8/10  ━━━━━━━━────   80%
- › ep     Pet Grief                             3/12  ━━━─────────   25%
- · single Some Single                                 ────────────
- ✓ track  Another Track                               ━━━━━━━━━━━━  100%
+ › album  XXX                                   8/10  ━━━━━━━━────   80%
+ › ep     XXX                                   3/12  ━━━─────────   25%
+ · single XXX                                         ────────────
+ ✓ track  XXX                                         ━━━━━━━━━━━━  100%
 
- Souvlaki  8/10  ·  Melon Yellow  41%  2.3MiB/s  eta 00:04
- Pet Grief  3/12  ·  A Window  12%  1.9MiB/s  eta 00:11
+ XXX  8/10  ·  XXX  41%  2.3MiB/s  eta 00:04
+ XXX  3/12  ·  XXX  12%  1.9MiB/s  eta 00:11
  ──────────────────────────────────────────────────────────────
  1/4 done · 0 failed · 2 active   mp3 · q cancel
 ```
-
 ---
 
 ## Features
 
 - **Flexible input.** A `.txt` file, comma-separated links, or a single link. Inside a file, links can be separated by commas, new lines, or both. Duplicates are dropped automatically.
-- **Minimal, dark monochrome TUI.** A `[Link]` line for what you gave it and a `[Download status]` list with one row per item: type (`album`, `ep`, `single`, `track`, `list`), track count, progress bar and percentage.
+- **Minimal TUI.** A `[Link]` line for what you gave it and a `[Download status]` list with one row per item: type (`album`, `ep`, `single`, `track`, `list`), track count, progress bar and percentage.
 - **Live detail line.** For every running link: the current track, its percentage, speed and ETA, so you can tell the difference between slow and stuck.
 - **Format picker.** Choose `mp3` (default), `m4a`, `opus` or `flac` from a short menu, or skip it with `-f`.
 - **Parallel downloads.** Several links at once (2 by default).
