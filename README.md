@@ -71,8 +71,6 @@ makepkg -si
 
 Uninstall with `sudo pacman -R ytm-dl`.
 
-Before building, edit the `# Maintainer:` line in `PKGBUILD` and, if you publish the project, add a `url=` line.
-
 ### Without installing
 
 ```bash
@@ -133,16 +131,6 @@ man ytm-dl                      # manual page
 | `YTM_DL_COOKIES` | browser to take cookies from | none |
 | `YTM_DL_VERBOSE` | set to `1` for verbose output and kept logs | off |
 
-### Keys
-
-| Where | Key | Action |
-|---|---|---|
-| Format picker | `↑` / `↓` | move |
-| Format picker | `1`-`4` | jump to a format |
-| Format picker | `Enter` | confirm |
-| Anywhere | `q` | quit / cancel running downloads |
-| Finished screen | any key | exit |
-
 ---
 
 ## Link file format
@@ -162,51 +150,6 @@ https://music.youtube.com/watch?v=YYYYYYYYYYY
 
 ---
 
-## Output
-
-```
-~/Music/ytm-dl/
-├── Souvlaki/
-│   ├── 01 - Alison.mp3
-│   ├── 02 - Machine Gun.mp3
-│   └── …
-├── Pet Grief/
-│   └── …
-├── Singles/                 ← single-track links with no album
-├── .archive                 ← tracks already downloaded (skipped next time)
-└── .logs/                   ← logs of failed links (link-1.log, …)
-```
-
-- Tracks are named `NN - Title.ext`; a single-track link is saved in its album's folder, or in `Singles/` when it has no album.
-- To download everything again, delete `.archive`.
-- `mp3` is encoded at the best variable quality (V0). `m4a` and `opus` keep YouTube's native audio without re-encoding, so they are faster and lighter on the CPU.
-
----
-
-## How it works
-
-1. **Input.** Your file or links are cleaned, de-duplicated and queued.
-2. **Workers.** Each link runs in its own background worker, which starts yt-dlp with its output going to plain files (no pipes) and follows those files for progress.
-3. **Status.** Workers write small state files; the main loop reads them and redraws the screen only when the picture changes.
-4. **Watchdog.** If a link produces no new bytes for the stall timeout, the worker stops it, retries it, and records the error if it still fails.
-5. **Summary.** When everything finishes you get a count of finished and failed links, with the last error and log path for each failure.
-
-The `--plain` mode and the TUI build their yt-dlp options from the same list, so they behave the same way. If something misbehaves in the TUI, run `--plain` to compare.
-
----
-
-## Troubleshooting
-
-| Problem | What to try |
-|---|---|
-| A download looks stuck | Read the live detail line: a speed of a few KiB/s means throttling, no change means a stall. The watchdog retries automatically after 60 s. |
-| Slow or throttled downloads | Install `deno`, update yt-dlp (`sudo pacman -Syu yt-dlp`), try `-c firefox`, or lower the load with `-j 1`. |
-| A link failed | Check `OUT/.logs/link-N.log`, or rerun with `-v`. |
-| Want to compare with raw yt-dlp | Run `ytm-dl --plain links.txt`. |
-| Some tracks are skipped | They are in `OUT/.archive`. Delete that file to re-download. |
-
----
-
 ## Exit status
 
 | Code | Meaning |
@@ -215,35 +158,3 @@ The `--plain` mode and the TUI build their yt-dlp options from the same list, so
 | `1` | at least one link failed |
 | `130` | cancelled with `q` or Ctrl-C |
 
----
-
-## Performance
-
-The script spends almost no CPU of its own. In testing with simulated downloads, the UI used roughly 0.5% of one core, polls at the same 0.5 s rate yt-dlp reports progress, and does not spawn extra processes while idle. The real work, and the real cost, is yt-dlp and ffmpeg. For the lightest CPU load use `-f m4a` or `-f opus`, which avoid re-encoding.
-
----
-
-## Project files
-
-| File | Purpose |
-|---|---|
-| `ytm-dl` | the script |
-| `ytm-dl.1` | man page |
-| `PKGBUILD` | Arch Linux package recipe |
-| `.SRCINFO` | package metadata (needed for the AUR) |
-| `LICENSE` | MIT license |
-
----
-
-## Notes and limitations
-
-- Album pages of the `browse/MPREb_…` kind may not be resolved by yt-dlp. Use the `playlist?list=OLAK5uy_…` link of the album instead.
-- Whether a release is labelled `ep` or `single` depends on the " - EP" / " - Single" suffix YouTube Music puts on the playlist title.
-- If YouTube changes its site, keep yt-dlp up to date; most breakage is fixed there, not in this script.
-- Only download content you have the right to download, and follow YouTube's terms of service and your local copyright laws.
-
----
-
-## License
-
-MIT. See `LICENSE`.
